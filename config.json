@@ -1,0 +1,26 @@
+{
+  "zones": [
+    {
+      "name": "Register",
+      "color": "#FF6B6B"
+    },
+    {
+      "name": "Floor",
+      "color": "#51CF66"
+    },
+    {
+      "name": "Fitting Room",
+      "color": "#339AF0"
+    },
+    {
+      "name": "Shipment",
+      "color": "#FF922B"
+    },
+    {
+      "name": "kids/footwear",
+      "color": "#ffcf00"
+    }
+  ],
+  "last_output_dir": "/Users/tjenkins/Desktop",
+  "last_import_dir": "/Users/tjenkins/Downloads"
+}
