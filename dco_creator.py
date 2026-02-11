@@ -416,21 +416,19 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
         zone_fill = PatternFill(start_color=fill_hex, end_color=fill_hex,
                                 fill_type="solid")
 
-        segments = emp.get("shift_segments", [])
+        shift_start = emp.get("shift_start")
+        shift_end = emp.get("shift_end")
+        start_min = shift_start[0] * 60 + shift_start[1] if shift_start else None
+        end_min = shift_end[0] * 60 + shift_end[1] if shift_end else None
 
         for i, (slot_h, slot_m) in enumerate(time_slots):
             cell = ws.cell(row=row, column=time_col_start + i)
             cell.border = thin_border
 
-            slot_min = slot_h * 60 + slot_m
-            in_shift = False
-            for (sh, sm), (eh, em) in segments:
-                if sh * 60 + sm <= slot_min < eh * 60 + em:
-                    in_shift = True
-                    break
-
-            if in_shift:
-                cell.fill = zone_fill
+            if start_min is not None and end_min is not None:
+                slot_min = slot_h * 60 + slot_m
+                if start_min <= slot_min < end_min:
+                    cell.fill = zone_fill
 
     # Column widths
     ws.column_dimensions["A"].width = 22
