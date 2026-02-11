@@ -136,6 +136,51 @@ def generate_time_slots(start_hour, end_hour):
     return slots
 
 
+def _get_zone_for_slot(emp, slot_h, slot_m):
+    """Return the zone name for a given time slot, or '' if not covered.
+
+    Multi-zone: checks zone_segments and shift_segments to skip break gaps.
+    Single zone: uses overall shift_start/shift_end range (colors continuously).
+    """
+    slot_min = slot_h * 60 + slot_m
+
+    # Multi-zone: use zone_segments; fill break gaps with preceding zone
+    zone_segs = emp.get("zone_segments", [])
+    if zone_segs:
+        # Check if slot falls within a zone segment directly
+        for seg in zone_segs:
+            seg_start = seg["start"][0] * 60 + seg["start"][1]
+            seg_end = seg["end"][0] * 60 + seg["end"][1]
+            if seg_start <= slot_min < seg_end:
+                return seg["zone"]
+        # Slot is in a break gap — extend the preceding zone segment's color
+        shift_start = emp.get("shift_start")
+        shift_end = emp.get("shift_end")
+        if shift_start and shift_end:
+            start_min = shift_start[0] * 60 + shift_start[1]
+            end_min = shift_end[0] * 60 + shift_end[1]
+            if start_min <= slot_min < end_min:
+                # Find the last zone segment that ended at or before this slot
+                best = None
+                for seg in zone_segs:
+                    seg_end = seg["end"][0] * 60 + seg["end"][1]
+                    if seg_end <= slot_min:
+                        best = seg["zone"]
+                if best:
+                    return best
+        return ""
+
+    # Single zone: color the full shift range continuously
+    shift_start = emp.get("shift_start")
+    shift_end = emp.get("shift_end")
+    if shift_start and shift_end:
+        start_min = shift_start[0] * 60 + shift_start[1]
+        end_min = shift_end[0] * 60 + shift_end[1]
+        if start_min <= slot_min < end_min:
+            return emp.get("zone", "")
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # ADP Excel Report Parser
 # ---------------------------------------------------------------------------
@@ -321,6 +366,7 @@ def extract_day_schedule(parsed, target_col):
             "shift_end": overall_end,
             "break_text": break_text,
             "zone": "",
+            "zone_segments": [],
         })
 
     return employees
@@ -413,6 +459,12 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
     # Border on the second merged cell too
     ws.cell(row=3, column=focuses_col_start + 1).border = thin_border
 
+    # Pre-build a fill cache for zone colors
+    fill_cache = {}
+    for zname, zhex in zone_colors.items():
+        fill_cache[zname] = PatternFill(start_color=zhex, end_color=zhex,
+                                        fill_type="solid")
+
     # Employee rows
     for row_idx, emp in enumerate(employees):
         row = row_idx + 4
@@ -443,24 +495,14 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
         focuses_cell.border = thin_border
         ws.cell(row=row, column=focuses_col_start + 1).border = thin_border
 
-        # Color the time slot cells based on shift segments
-        fill_hex = zone_colors.get(zone_name, "FFFFFF")
-        zone_fill = PatternFill(start_color=fill_hex, end_color=fill_hex,
-                                fill_type="solid")
-
-        shift_start = emp.get("shift_start")
-        shift_end = emp.get("shift_end")
-        start_min = shift_start[0] * 60 + shift_start[1] if shift_start else None
-        end_min = shift_end[0] * 60 + shift_end[1] if shift_end else None
-
+        # Color the time slot cells using per-slot zone lookup
         for i, (slot_h, slot_m) in enumerate(time_slots):
             cell = ws.cell(row=row, column=time_col_start + i)
             cell.border = thin_border
 
-            if start_min is not None and end_min is not None:
-                slot_min = slot_h * 60 + slot_m
-                if start_min <= slot_min < end_min:
-                    cell.fill = zone_fill
+            slot_zone = _get_zone_for_slot(emp, slot_h, slot_m)
+            if slot_zone and slot_zone in fill_cache:
+                cell.fill = fill_cache[slot_zone]
 
     # Column widths
     ws.column_dimensions["A"].width = 22
@@ -594,7 +636,7 @@ class DCOCreatorApp:
         self.emp_tree.column("job", width=90)
         self.emp_tree.column("shift", width=150)
         self.emp_tree.column("break_time", width=70)
-        self.emp_tree.column("zone", width=100)
+        self.emp_tree.column("zone", width=150)
 
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL,
                                   command=self.emp_tree.yview)
@@ -903,12 +945,12 @@ class DCOCreatorApp:
         day_name = getattr(self, "_current_day_name", "")
         date_str = getattr(self, "_current_date_str", "")
         lines = [f"  {day_name} {date_str}", ""]
-        lines.append(f"  {'NAME':<22} {'SHIFT':<22} {'BREAK':<8} {'ZONE':<12}")
-        lines.append("  " + "-" * 66)
+        lines.append(f"  {'NAME':<22} {'SHIFT':<22} {'BREAK':<8} {'ZONE':<25}")
+        lines.append("  " + "-" * 79)
         for emp in self.employees:
             lines.append(
                 f"  {emp['name']:<22} {emp.get('shift_text',''):<22} "
-                f"{emp.get('break_text',''):<8} {emp.get('zone',''):<12}")
+                f"{emp.get('break_text',''):<8} {emp.get('zone',''):<25}")
         PreviewDialog(self.root, "\n".join(lines))
 
     def _browse_output(self):
@@ -1086,6 +1128,8 @@ class ZoneAssignmentDialog:
 
         ttk.Button(bottom_frame, text="Clear Zone",
                    command=self._clear_zone).pack(side=tk.LEFT)
+        ttk.Button(bottom_frame, text="Split Zones",
+                   command=self._open_split_zones).pack(side=tk.LEFT, padx=(10, 0))
 
         self.done_btn = ttk.Button(bottom_frame, text="Done",
                                    command=self._done)
@@ -1118,10 +1162,11 @@ class ZoneAssignmentDialog:
             state=tk.NORMAL if self.current_index < total - 1
             else tk.DISABLED)
 
-        # Highlight currently assigned zone
+        # Highlight currently assigned zone (only if single-zone, not split)
         current_zone = emp.get("zone", "")
+        has_splits = bool(emp.get("zone_segments"))
         for btn_frame, label, zone_name in self.zone_buttons:
-            if zone_name == current_zone:
+            if zone_name == current_zone and not has_splits:
                 btn_frame.config(relief=tk.SUNKEN, bd=3)
             else:
                 btn_frame.config(relief=tk.RAISED, bd=2)
@@ -1134,6 +1179,7 @@ class ZoneAssignmentDialog:
         if not self.employees:
             return
         self.employees[self.current_index]["zone"] = zone_name
+        self.employees[self.current_index]["zone_segments"] = []
 
         if self.mode == "single":
             self.win.destroy()
@@ -1157,6 +1203,7 @@ class ZoneAssignmentDialog:
     def _clear_zone(self):
         if self.employees:
             self.employees[self.current_index]["zone"] = ""
+            self.employees[self.current_index]["zone_segments"] = []
             self._show_employee()
 
     def _zone_by_number(self, num):
@@ -1166,8 +1213,441 @@ class ZoneAssignmentDialog:
     def _done(self):
         self.win.destroy()
 
+    def _open_split_zones(self):
+        if not self.employees:
+            return
+        emp = self.employees[self.current_index]
+        dialog = SplitZoneDialog(self.win, emp, self.zones)
+        if dialog.result is not None:
+            emp["zone_segments"] = dialog.result
+            # Build summary zone string
+            zone_names = []
+            for seg in dialog.result:
+                if seg["zone"] not in zone_names:
+                    zone_names.append(seg["zone"])
+            emp["zone"] = " / ".join(zone_names) if zone_names else ""
+
+            if self.mode == "single":
+                self.win.destroy()
+                return
+
+            # Sequential: advance to next employee
+            if self.current_index < len(self.employees) - 1:
+                self.current_index += 1
+            self._show_employee()
+
     def _cancel(self):
         self.cancelled = True
+        self.win.destroy()
+
+
+class SplitZoneDialog:
+    """Two-phase dialog: Phase 1 adds splits, Phase 2 sequentially assigns zones."""
+
+    def __init__(self, parent, emp, zones):
+        self.emp = emp
+        self.zones = zones
+        self.result = None
+        self.current_block_index = 0
+
+        # Build initial blocks from shift segments (respects break gaps)
+        self.blocks = []
+        for (sh, sm), (eh, em) in emp.get("shift_segments", []):
+            self.blocks.append({
+                "start": (sh, sm), "end": (eh, em), "zone": ""
+            })
+
+        # Pre-populate from existing zone_segments if any
+        existing = emp.get("zone_segments", [])
+        if existing:
+            self.blocks = []
+            for seg in existing:
+                self.blocks.append({
+                    "start": tuple(seg["start"]),
+                    "end": tuple(seg["end"]),
+                    "zone": seg["zone"],
+                })
+
+        # Store original blocks for "Remove All Splits"
+        self.original_blocks = []
+        for (sh, sm), (eh, em) in emp.get("shift_segments", []):
+            self.original_blocks.append({
+                "start": (sh, sm), "end": (eh, em), "zone": ""
+            })
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("Split Zones")
+        self.win.geometry("650x580")
+        self.win.transient(parent)
+        self.win.grab_set()
+
+        self._build_ui()
+        self._show_phase1()
+
+        self.win.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.win.bind("<Escape>", lambda e: self._cancel())
+        self.win.wait_window()
+
+    def _build_ui(self):
+        # Header (shared)
+        header = ttk.Frame(self.win, padding=(15, 10, 15, 5))
+        header.pack(fill=tk.X)
+
+        ttk.Label(header, text=self.emp["name"],
+                  font=("Helvetica", 20, "bold")).pack(anchor=tk.W)
+        ttk.Label(header, text=self.emp.get("shift_text", ""),
+                  font=("Helvetica", 14), foreground="gray").pack(anchor=tk.W)
+
+        # Blocks treeview (shared)
+        tree_frame = ttk.LabelFrame(self.win, text="Time Blocks", padding=8)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(5, 5))
+
+        cols = ("num", "time", "zone")
+        self.block_tree = ttk.Treeview(tree_frame, columns=cols,
+                                       show="headings", height=6,
+                                       selectmode="browse")
+        self.block_tree.heading("num", text="#")
+        self.block_tree.heading("time", text="Time Range")
+        self.block_tree.heading("zone", text="Zone")
+        self.block_tree.column("num", width=40, anchor=tk.CENTER)
+        self.block_tree.column("time", width=200, anchor=tk.CENTER)
+        self.block_tree.column("zone", width=200, anchor=tk.CENTER)
+        self.block_tree.pack(fill=tk.BOTH, expand=True)
+
+        # ---- Phase 1: Split Controls ----
+        self.phase1_frame = ttk.Frame(self.win)
+
+        split_frame = ttk.LabelFrame(self.phase1_frame,
+                                     text="Split Controls", padding=8)
+        split_frame.pack(fill=tk.X, padx=15, pady=(0, 5))
+
+        # Compute overall shift range in minutes for the slider
+        segments = self.emp.get("shift_segments", [])
+        if segments:
+            self._slider_start = segments[0][0][0] * 60 + segments[0][0][1]
+            self._slider_end = segments[-1][1][0] * 60 + segments[-1][1][1]
+        else:
+            self._slider_start = 0
+            self._slider_end = 1440
+
+        # Timeline canvas with tick marks
+        self._track_pad_left = 18
+        self._track_pad_right = 18
+        self.timeline_canvas = tk.Canvas(split_frame, height=32,
+                                         highlightthickness=0)
+        self.timeline_canvas.pack(fill=tk.X, pady=(0, 0))
+        self.timeline_canvas.bind("<Configure>", self._draw_timeline)
+
+        # Slider
+        self.slider_var = tk.IntVar(value=self._slider_start + 30)
+        self.split_slider = ttk.Scale(
+            split_frame, from_=self._slider_start,
+            to=self._slider_end,
+            orient=tk.HORIZONTAL,
+            variable=self.slider_var,
+            command=self._on_slider_change,
+        )
+        self.split_slider.pack(fill=tk.X, pady=(0, 8))
+        self._on_slider_change(None)
+
+        btn_row = ttk.Frame(split_frame)
+        btn_row.pack(fill=tk.X)
+
+        tk.Button(btn_row, text="Add Split",
+                  command=self._add_split).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(btn_row, text="Remove Last Split",
+                  command=self._remove_last_split).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(btn_row, text="Remove All Splits",
+                  command=self._remove_all_splits).pack(side=tk.LEFT)
+
+        # Phase 1 bottom bar
+        p1_bottom = ttk.Frame(self.phase1_frame, padding=(15, 5, 15, 10))
+        p1_bottom.pack(fill=tk.X)
+
+        tk.Button(p1_bottom, text="Set Zones \u25B6",
+                  command=self._enter_phase2,
+                  font=("Helvetica", 12, "bold")).pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(p1_bottom, text="Cancel",
+                  command=self._cancel).pack(side=tk.RIGHT)
+
+        # ---- Phase 2: Zone Assignment ----
+        self.phase2_frame = ttk.Frame(self.win)
+
+        # Current block info
+        block_info = ttk.Frame(self.phase2_frame, padding=(15, 5))
+        block_info.pack(fill=tk.X)
+
+        self.block_label = ttk.Label(block_info, text="",
+                                     font=("Helvetica", 18, "bold"))
+        self.block_label.pack(anchor=tk.W)
+
+        self.block_progress = ttk.Label(block_info, text="",
+                                        foreground="gray")
+        self.block_progress.pack(anchor=tk.W)
+
+        # Zone buttons
+        zone_frame = ttk.LabelFrame(self.phase2_frame, text="Select Zone",
+                                    padding=10)
+        zone_frame.pack(fill=tk.X, padx=15, pady=(0, 5))
+
+        self.zone_buttons = []
+        for i, zone in enumerate(self.zones):
+            row = i // 2
+            col = i % 2
+            color = zone["color"]
+            text_color = _text_color_for_bg(color)
+
+            btn_frame = tk.Frame(zone_frame, bg=color, bd=2,
+                                 relief=tk.RAISED, cursor="hand2")
+            btn_frame.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
+
+            label = tk.Label(btn_frame, text=zone["name"], bg=color,
+                             fg=text_color, font=("Helvetica", 12, "bold"),
+                             padx=15, pady=6, cursor="hand2")
+            label.pack(fill=tk.BOTH, expand=True)
+
+            btn_frame.bind("<Button-1>",
+                           lambda e, z=zone["name"]: self._assign_zone(z))
+            label.bind("<Button-1>",
+                       lambda e, z=zone["name"]: self._assign_zone(z))
+
+            self.zone_buttons.append((btn_frame, label, zone["name"]))
+
+        zone_frame.columnconfigure(0, weight=1)
+        zone_frame.columnconfigure(1, weight=1)
+
+        # Phase 2 bottom bar
+        p2_bottom = ttk.Frame(self.phase2_frame, padding=(15, 5, 15, 10))
+        p2_bottom.pack(fill=tk.X)
+
+        tk.Button(p2_bottom, text="\u25C0 Back to Splits",
+                  command=self._back_to_phase1).pack(side=tk.LEFT)
+
+        self.done_btn = tk.Button(p2_bottom, text="Done",
+                                  command=self._done)
+        self.done_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        tk.Button(p2_bottom, text="Cancel",
+                  command=self._cancel).pack(side=tk.RIGHT)
+
+    # ---- Phase switching ----
+
+    def _show_phase1(self):
+        self.phase2_frame.pack_forget()
+        self.phase1_frame.pack(fill=tk.BOTH, expand=False)
+        self._refresh_blocks()
+
+    def _enter_phase2(self):
+        if len(self.blocks) < 2:
+            messagebox.showinfo(
+                "No Splits",
+                "Add at least one split before setting zones.",
+                parent=self.win)
+            return
+        # Clear all zones for fresh assignment
+        for blk in self.blocks:
+            blk["zone"] = ""
+        self.current_block_index = 0
+        self.phase1_frame.pack_forget()
+        self.phase2_frame.pack(fill=tk.BOTH, expand=False)
+        self._refresh_blocks()
+        self._show_current_block()
+
+    def _back_to_phase1(self):
+        self._show_phase1()
+
+    # ---- Phase 1 methods ----
+
+    def _refresh_blocks(self):
+        for item in self.block_tree.get_children():
+            self.block_tree.delete(item)
+        for i, blk in enumerate(self.blocks):
+            start_str = format_time_short(*blk["start"])
+            end_str = format_time_short(*blk["end"])
+            self.block_tree.insert("", tk.END, values=(
+                i + 1, f"{start_str} - {end_str}", blk["zone"] or "(none)"
+            ))
+        # Select current block
+        children = self.block_tree.get_children()
+        if children:
+            idx = min(self.current_block_index, len(children) - 1)
+            self.block_tree.selection_set(children[idx])
+        self._refresh_slider()
+
+    def _on_slider_change(self, value):
+        """Snap slider to nearest 30-min increment and redraw indicator."""
+        raw = self.slider_var.get()
+        snapped = round(raw / 30) * 30
+        snapped = max(self._slider_start + 30,
+                      min(snapped, self._slider_end - 30))
+        if snapped != raw:
+            self.slider_var.set(snapped)
+        self._draw_timeline(None)
+
+    def _draw_timeline(self, event):
+        """Draw tick marks and time labels on the timeline canvas."""
+        c = self.timeline_canvas
+        c.delete("all")
+        w = c.winfo_width()
+        if w < 10:
+            return
+
+        pad_l = self._track_pad_left
+        pad_r = self._track_pad_right
+        track_w = w - pad_l - pad_r
+        if track_w <= 0:
+            return
+
+        total_range = self._slider_end - self._slider_start
+        if total_range <= 0:
+            return
+
+        current_val = self.slider_var.get()
+
+        # Draw each 30-min tick
+        t = self._slider_start
+        while t <= self._slider_end:
+            frac = (t - self._slider_start) / total_range
+            x = pad_l + frac * track_w
+            is_hour = (t % 60 == 0)
+
+            tick_h = 12 if is_hour else 7
+            c.create_line(x, 32 - tick_h, x, 32, fill="#888888",
+                          width=2 if is_hour else 1)
+
+            if is_hour:
+                h, m = divmod(t, 60)
+                lbl = format_time_short(h, m)
+                c.create_text(x, 32 - tick_h - 8, text=lbl,
+                              font=("Helvetica", 9), fill="#444444",
+                              anchor=tk.S)
+            t += 30
+
+        # Current position indicator
+        cur_frac = (current_val - self._slider_start) / total_range
+        cx = pad_l + cur_frac * track_w
+        h, m = divmod(current_val, 60)
+        c.create_text(cx, 2, text=format_time_short(h, m),
+                      font=("Helvetica", 11, "bold"), fill="#0066CC",
+                      anchor=tk.N)
+
+    def _refresh_slider(self):
+        self._draw_timeline(None)
+
+    def _add_split(self):
+        split_min = self.slider_var.get()
+        split_time = divmod(split_min, 60)
+
+        for blk in self.blocks:
+            if blk["start"] == split_time or blk["end"] == split_time:
+                messagebox.showinfo(
+                    "Split", f"{format_time_short(*split_time)} is already "
+                    "a block boundary.", parent=self.win)
+                return
+
+        for i, blk in enumerate(self.blocks):
+            blk_start = blk["start"][0] * 60 + blk["start"][1]
+            blk_end = blk["end"][0] * 60 + blk["end"][1]
+            if blk_start < split_min < blk_end:
+                new_block1 = {
+                    "start": blk["start"],
+                    "end": split_time,
+                    "zone": blk["zone"],
+                }
+                new_block2 = {
+                    "start": split_time,
+                    "end": blk["end"],
+                    "zone": "",
+                }
+                self.blocks[i:i+1] = [new_block1, new_block2]
+                self.current_block_index = i + 1
+                self._refresh_blocks()
+                return
+
+        messagebox.showinfo("Split",
+                            "That time falls in a break gap, not a shift block.",
+                            parent=self.win)
+
+    def _remove_last_split(self):
+        if len(self.blocks) <= len(self.original_blocks):
+            messagebox.showinfo("Remove Split",
+                                "No splits to remove.", parent=self.win)
+            return
+        last = self.blocks.pop()
+        self.blocks[-1]["end"] = last["end"]
+        self.current_block_index = max(0, len(self.blocks) - 1)
+        self._refresh_blocks()
+
+    def _remove_all_splits(self):
+        self.blocks = []
+        for blk in self.original_blocks:
+            self.blocks.append({
+                "start": blk["start"],
+                "end": blk["end"],
+                "zone": "",
+            })
+        self.current_block_index = 0
+        self._refresh_blocks()
+
+    # ---- Phase 2 methods ----
+
+    def _show_current_block(self):
+        blk = self.blocks[self.current_block_index]
+        start_str = format_time_short(*blk["start"])
+        end_str = format_time_short(*blk["end"])
+        self.block_label.config(
+            text=f"Block {self.current_block_index + 1}: "
+                 f"{start_str} - {end_str}")
+
+        zoned = sum(1 for b in self.blocks if b["zone"])
+        self.block_progress.config(
+            text=f"Block {self.current_block_index + 1} of {len(self.blocks)}"
+                 f"  ({zoned}/{len(self.blocks)} zoned)")
+
+        # Highlight the current block in treeview
+        children = self.block_tree.get_children()
+        if children:
+            self.block_tree.selection_set(
+                children[self.current_block_index])
+
+        # Highlight assigned zone button
+        current_zone = blk.get("zone", "")
+        for btn_frame, label, zone_name in self.zone_buttons:
+            if zone_name == current_zone and current_zone:
+                btn_frame.config(relief=tk.SUNKEN, bd=3)
+            else:
+                btn_frame.config(relief=tk.RAISED, bd=2)
+
+    def _assign_zone(self, zone_name):
+        self.blocks[self.current_block_index]["zone"] = zone_name
+        self._refresh_blocks()
+
+        # Auto-advance to next unzoned block
+        if self.current_block_index < len(self.blocks) - 1:
+            self.current_block_index += 1
+        self._show_current_block()
+
+        # If all blocks zoned, focus Done
+        if all(b["zone"] for b in self.blocks):
+            self.done_btn.focus_set()
+
+    def _done(self):
+        for i, blk in enumerate(self.blocks):
+            if not blk["zone"]:
+                messagebox.showwarning(
+                    "Missing Zone",
+                    f"Block {i + 1} has no zone assigned.",
+                    parent=self.win)
+                return
+        self.result = [
+            {"zone": blk["zone"],
+             "start": blk["start"],
+             "end": blk["end"]}
+            for blk in self.blocks
+        ]
+        self.win.destroy()
+
+    def _cancel(self):
+        self.result = None
         self.win.destroy()
 
 
@@ -1262,6 +1742,7 @@ class EmployeeEditDialog:
             "shift_end": shift_end,
             "break_text": self.break_var.get().strip(),
             "zone": self.zone_var.get().strip(),
+            "zone_segments": [],
         }
         self.win.destroy()
 
