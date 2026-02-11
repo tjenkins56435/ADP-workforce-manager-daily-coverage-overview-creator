@@ -67,6 +67,14 @@ def save_config(cfg):
 # Time helpers
 # ---------------------------------------------------------------------------
 
+def _text_color_for_bg(hex_color):
+    """Return '#000000' or '#FFFFFF' for readable text on the given background."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "#000000" if luminance > 0.5 else "#FFFFFF"
+
+
 def parse_time_range(text):
     """Parse '10:00 AM - 2:00 PM' into ((hour, min), (hour, min)) tuple."""
     if not text or not isinstance(text, str):
@@ -721,6 +729,11 @@ class DCOCreatorApp:
             f"{len(self.employees)} employees scheduled for "
             f"{self._current_day_name} {self._current_date_str}")
 
+        # Auto-open zone assignment after loading a day
+        if self.employees:
+            self.root.after(100, lambda: self._open_zone_assignment(
+                start_index=0, mode="sequential"))
+
     # ----- Zone Management -----
 
     def _refresh_zone_list(self):
@@ -802,35 +815,28 @@ class DCOCreatorApp:
         self._refresh_employee_list()
         self.emp_tree.selection_set(self.emp_tree.get_children()[idx + 1])
 
+    def _open_zone_assignment(self, start_index=0, mode="sequential"):
+        """Open the zone assignment dialog."""
+        if not self.employees:
+            messagebox.showinfo("No Employees", "Load a day first.")
+            return
+        if not self.zones:
+            messagebox.showinfo("No Zones", "Add zones first.")
+            return
+        ZoneAssignmentDialog(self.root, self.employees, self.zones,
+                             start_index=start_index, mode=mode)
+        self._refresh_employee_list()
+
     def _set_zone(self):
         idx = self._get_selected_index()
         if idx is None:
             messagebox.showinfo("Set Zone", "Select an employee first.")
             return
-        zone_names = [z["name"] for z in self.zones]
-        if not zone_names:
-            messagebox.showinfo("No Zones", "Add zones first.")
-            return
-        dialog = ZonePickerDialog(self.root, zone_names,
-                                  self.employees[idx].get("zone", ""))
-        if dialog.result is not None:
-            self.employees[idx]["zone"] = dialog.result
-            self._refresh_employee_list()
+        self._open_zone_assignment(start_index=idx, mode="single")
 
     def _set_all_zones(self):
-        """Set the same zone for all employees at once."""
-        if not self.employees:
-            messagebox.showinfo("No Employees", "Load a day first.")
-            return
-        zone_names = [z["name"] for z in self.zones]
-        if not zone_names:
-            messagebox.showinfo("No Zones", "Add zones first.")
-            return
-        dialog = ZonePickerDialog(self.root, zone_names, "")
-        if dialog.result is not None:
-            for emp in self.employees:
-                emp["zone"] = dialog.result
-            self._refresh_employee_list()
+        """Open sequential zone assignment for all employees."""
+        self._open_zone_assignment(start_index=0, mode="sequential")
 
     def _edit_employee(self):
         idx = self._get_selected_index()
@@ -968,33 +974,200 @@ class ZoneDialog:
         self.win.destroy()
 
 
-class ZonePickerDialog:
-    def __init__(self, parent, zone_names, current=""):
-        self.result = None
+class ZoneAssignmentDialog:
+    """Large zone-assignment dialog with colored buttons.
+
+    Modes:
+        "sequential" - auto-advance through all employees
+        "single"     - pick one zone then close
+    """
+
+    def __init__(self, parent, employees, zones, start_index=0,
+                 mode="sequential"):
+        self.employees = employees
+        self.zones = zones
+        self.mode = mode
+        self.current_index = start_index
+        self.cancelled = False
+
         self.win = tk.Toplevel(parent)
-        self.win.title("Select Zone")
-        self.win.geometry("250x130")
+        self.win.title("Zone Assignment")
+        self.win.geometry("600x500")
         self.win.transient(parent)
         self.win.grab_set()
 
-        ttk.Label(self.win, text="Assign zone:").pack(padx=10, pady=(10, 5))
-        self.zone_var = tk.StringVar(
-            value=current if current else zone_names[0])
-        ttk.Combobox(self.win, textvariable=self.zone_var,
-                     values=zone_names, state="readonly",
-                     width=25).pack(padx=10)
+        self._build_ui()
+        self._show_employee()
 
-        btn_frame = ttk.Frame(self.win)
-        btn_frame.pack(pady=15)
-        ttk.Button(btn_frame, text="OK", command=self._ok).pack(
-            side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel",
-                   command=self.win.destroy).pack(side=tk.LEFT, padx=5)
+        self.win.bind("<Escape>", lambda e: self._cancel())
+        self.win.bind("<Left>", lambda e: self._prev())
+        self.win.bind("<Right>", lambda e: self._next())
+        for i in range(1, 10):
+            self.win.bind(str(i), lambda e, idx=i: self._zone_by_number(idx))
 
+        self.win.protocol("WM_DELETE_WINDOW", self._cancel)
         self.win.wait_window()
 
-    def _ok(self):
-        self.result = self.zone_var.get()
+    def _build_ui(self):
+        # Header
+        header_frame = ttk.Frame(self.win, padding=(15, 10, 15, 5))
+        header_frame.pack(fill=tk.X)
+
+        self.name_label = ttk.Label(header_frame, text="",
+                                    font=("Helvetica", 24, "bold"))
+        self.name_label.pack(anchor=tk.W)
+
+        self.info_label = ttk.Label(header_frame, text="",
+                                    font=("Helvetica", 16),
+                                    foreground="gray")
+        self.info_label.pack(anchor=tk.W)
+
+        # Progress
+        progress_frame = ttk.Frame(self.win, padding=(15, 5))
+        progress_frame.pack(fill=tk.X)
+
+        self.progress_label = ttk.Label(progress_frame, text="")
+        self.progress_label.pack(anchor=tk.W)
+
+        self.progress_bar = ttk.Progressbar(progress_frame,
+                                            mode="determinate", length=300)
+        self.progress_bar.pack(fill=tk.X, pady=(2, 0))
+
+        # Navigation
+        nav_frame = ttk.Frame(self.win, padding=(15, 5))
+        nav_frame.pack(fill=tk.X)
+
+        self.prev_btn = ttk.Button(nav_frame, text="\u25C0 Prev",
+                                   command=self._prev)
+        self.prev_btn.pack(side=tk.LEFT)
+
+        self.next_btn = ttk.Button(nav_frame, text="Next \u25B6",
+                                   command=self._next)
+        self.next_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Zone buttons area
+        zone_outer = ttk.LabelFrame(self.win, text="Zones", padding=10)
+        zone_outer.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        self.zone_buttons = []
+        for i, zone in enumerate(self.zones):
+            row = i // 2
+            col = i % 2
+
+            color = zone["color"]
+            text_color = _text_color_for_bg(color)
+
+            btn_frame = tk.Frame(zone_outer, bg=color, bd=2,
+                                 relief=tk.RAISED, cursor="hand2")
+            btn_frame.grid(row=row, column=col, padx=5, pady=5,
+                           sticky="nsew")
+
+            label = tk.Label(btn_frame, text=zone["name"], bg=color,
+                             fg=text_color, font=("Helvetica", 14, "bold"),
+                             padx=20, pady=12, cursor="hand2")
+            label.pack(fill=tk.BOTH, expand=True)
+
+            btn_frame.bind("<Button-1>",
+                           lambda e, z=zone["name"]: self._assign_zone(z))
+            label.bind("<Button-1>",
+                       lambda e, z=zone["name"]: self._assign_zone(z))
+
+            self.zone_buttons.append((btn_frame, label, zone["name"]))
+
+        zone_outer.columnconfigure(0, weight=1)
+        zone_outer.columnconfigure(1, weight=1)
+        num_rows = (len(self.zones) + 1) // 2
+        for r in range(num_rows):
+            zone_outer.rowconfigure(r, weight=1)
+
+        # Bottom bar
+        bottom_frame = ttk.Frame(self.win, padding=(15, 5, 15, 10))
+        bottom_frame.pack(fill=tk.X)
+
+        ttk.Button(bottom_frame, text="Clear Zone",
+                   command=self._clear_zone).pack(side=tk.LEFT)
+
+        self.done_btn = ttk.Button(bottom_frame, text="Done",
+                                   command=self._done)
+        self.done_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
+        ttk.Button(bottom_frame, text="Cancel",
+                   command=self._cancel).pack(side=tk.RIGHT)
+
+    def _show_employee(self):
+        if not self.employees:
+            return
+
+        emp = self.employees[self.current_index]
+        self.name_label.config(text=emp["name"])
+        self.info_label.config(
+            text=f"{emp.get('shift_text', '')}  |  {emp.get('job', '')}")
+
+        total = len(self.employees)
+        zoned = sum(1 for e in self.employees if e.get("zone"))
+        self.progress_label.config(
+            text=f"Employee {self.current_index + 1} of {total}"
+                 f"  ({zoned} zoned)")
+        self.progress_bar["maximum"] = total
+        self.progress_bar["value"] = zoned
+
+        # Update nav buttons
+        self.prev_btn.config(
+            state=tk.NORMAL if self.current_index > 0 else tk.DISABLED)
+        self.next_btn.config(
+            state=tk.NORMAL if self.current_index < total - 1
+            else tk.DISABLED)
+
+        # Highlight currently assigned zone
+        current_zone = emp.get("zone", "")
+        for btn_frame, label, zone_name in self.zone_buttons:
+            if zone_name == current_zone:
+                btn_frame.config(relief=tk.SUNKEN, bd=3)
+            else:
+                btn_frame.config(relief=tk.RAISED, bd=2)
+
+        # If all employees are zoned, focus Done button
+        if zoned == total:
+            self.done_btn.focus_set()
+
+    def _assign_zone(self, zone_name):
+        if not self.employees:
+            return
+        self.employees[self.current_index]["zone"] = zone_name
+
+        if self.mode == "single":
+            self.win.destroy()
+            return
+
+        # Sequential: advance to next employee
+        if self.current_index < len(self.employees) - 1:
+            self.current_index += 1
+        self._show_employee()
+
+    def _prev(self):
+        if self.current_index > 0:
+            self.current_index -= 1
+            self._show_employee()
+
+    def _next(self):
+        if self.current_index < len(self.employees) - 1:
+            self.current_index += 1
+            self._show_employee()
+
+    def _clear_zone(self):
+        if self.employees:
+            self.employees[self.current_index]["zone"] = ""
+            self._show_employee()
+
+    def _zone_by_number(self, num):
+        if num <= len(self.zones):
+            self._assign_zone(self.zones[num - 1]["name"])
+
+    def _done(self):
+        self.win.destroy()
+
+    def _cancel(self):
+        self.cancelled = True
         self.win.destroy()
 
 
