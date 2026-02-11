@@ -53,10 +53,13 @@ Zones are fully customizable — add, edit, or delete zones with any name and co
 Default zones:
 | Zone | Color |
 |------|-------|
-| Register | Red |
-| Floor | Green |
-| Fitting Room | Blue |
-| Shipment | Orange |
+| Adults | Red |
+| Kids/Footwear | Yellow |
+| Cashiers | Green |
+| Replenishment/Refill | Purple |
+| Shipment | Blue |
+| Operation | Orange |
+| Fitting Rooms | Coral |
 
 ### Manual Entries
 

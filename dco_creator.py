@@ -27,10 +27,13 @@ except ImportError:
 # ---------------------------------------------------------------------------
 CONFIG_PATH = Path(__file__).parent / "config.json"
 DEFAULT_ZONES = [
-    {"name": "Register", "color": "#FF6B6B"},
-    {"name": "Floor", "color": "#51CF66"},
-    {"name": "Fitting Room", "color": "#339AF0"},
-    {"name": "Shipment", "color": "#FF922B"},
+    {"name": "Adults", "color": "#FF0000"},
+    {"name": "Kids/Footwear", "color": "#FFD700"},
+    {"name": "Cashiers", "color": "#00C853"},
+    {"name": "Replenishment/Refill", "color": "#9C27B0"},
+    {"name": "Shipment", "color": "#2196F3"},
+    {"name": "Operation", "color": "#FF922B"},
+    {"name": "Fitting Rooms", "color": "#FF7F50"},
 ]
 
 DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday",
