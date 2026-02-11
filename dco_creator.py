@@ -362,8 +362,11 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
     center_align = Alignment(horizontal="center", vertical="center")
     left_align = Alignment(horizontal="left", vertical="center")
 
+    # Focuses column (2 merged columns after time slots)
+    focuses_col_start = time_col_start + len(time_slots)
+
     # Row 1: Day and date header
-    total_cols = time_col_start + len(time_slots) - 1
+    total_cols = focuses_col_start + 1  # includes both Focuses columns
     ws.merge_cells(start_row=1, start_column=1,
                    end_row=1, end_column=total_cols)
     header_cell = ws.cell(row=1, column=1, value=f"{day_name} {date_str}")
@@ -390,6 +393,18 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
         cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2",
                                 fill_type="solid")
 
+    # Focuses header (merged across 2 columns)
+    ws.merge_cells(start_row=3, start_column=focuses_col_start,
+                   end_row=3, end_column=focuses_col_start + 1)
+    focuses_header = ws.cell(row=3, column=focuses_col_start, value="FOCUSES")
+    focuses_header.font = col_header_font
+    focuses_header.alignment = center_align
+    focuses_header.border = thin_border
+    focuses_header.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2",
+                                      fill_type="solid")
+    # Border on the second merged cell too
+    ws.cell(row=3, column=focuses_col_start + 1).border = thin_border
+
     # Employee rows
     for row_idx, emp in enumerate(employees):
         row = row_idx + 4
@@ -410,8 +425,17 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
         ws.cell(row=row, column=3).alignment = center_align
         ws.cell(row=row, column=3).border = thin_border
 
-        # Color the time slot cells based on shift segments
+        # Focuses (zone name, merged across 2 columns)
         zone_name = emp.get("zone", "")
+        ws.merge_cells(start_row=row, start_column=focuses_col_start,
+                       end_row=row, end_column=focuses_col_start + 1)
+        focuses_cell = ws.cell(row=row, column=focuses_col_start, value=zone_name)
+        focuses_cell.font = data_font
+        focuses_cell.alignment = center_align
+        focuses_cell.border = thin_border
+        ws.cell(row=row, column=focuses_col_start + 1).border = thin_border
+
+        # Color the time slot cells based on shift segments
         fill_hex = zone_colors.get(zone_name, "FFFFFF")
         zone_fill = PatternFill(start_color=fill_hex, end_color=fill_hex,
                                 fill_type="solid")
@@ -437,6 +461,9 @@ def generate_excel(employees, zones, day_name, date_str, output_path,
     for i in range(len(time_slots)):
         col_letter = get_column_letter(time_col_start + i)
         ws.column_dimensions[col_letter].width = 5
+    for i in range(2):
+        col_letter = get_column_letter(focuses_col_start + i)
+        ws.column_dimensions[col_letter].width = 12
 
     # Print setup
     ws.page_setup.orientation = "landscape"
